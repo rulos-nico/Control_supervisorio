@@ -87,16 +87,18 @@ class Automata:  # Automaton structure
     def add_transition(self, transitions: list, event: list, uncontrollable: list = [], uc_events: list = [],
                        c_events: list = [], dict_events: dict = [], dict_events_name: dict = []):
         # Add a transition in the automaton
+        # Convertir uncontrollable a set para búsquedas O(1)
+        uncontrollable_set = set(uncontrollable) if uncontrollable else set()
+        
         for i in range(0, len(event)):
-            aux_event = event[i]
-            aux_list = dict_events.keys()
-            if event[i] not in self.uc_events and event[i] in uncontrollable:
+            # aux_event no se usa, solo accedemos directamente a event[i]
+            if event[i] not in self.uc_events and event[i] in uncontrollable_set:
                 self.uc_events.append(event[i])
-            if event[i] not in self.c_events and event[i] not in uncontrollable:
+            if event[i] not in self.c_events and event[i] not in uncontrollable_set:
                 self.c_events.append(event[i])
 
             if event[i] not in dict_events.keys():
-                if event[i] in uncontrollable:
+                if event[i] in uncontrollable_set:
                     if event[i] not in uc_events:
                         uc_events.append(event[i])
                         id = 2 * (len(uc_events) - 1)
@@ -219,31 +221,70 @@ class process:
         return
 
     def complete_spec(self, name):  # For an automaton add all the self-loops of uncontrollable events
+        # Optimización: acumular todas las transiciones y agregarlas en batch
+        transitions_batch = []
+        events_batch = []
+        uncontrollable_batch = []
+        
+        uc_events = self.automatas[name].uc_events
+        
         for s in self.automatas[name].states:
-            for e in self.automatas[name].uc_events:
-                active_events = s.get_active_events()
-                if e not in active_events:
-                    self.add_transition(name, [(s.get_id(), s.get_id())], [e], [e])
-                # print(s.get_id(),e)
+            # Convertir a set para búsqueda O(1)
+            active_events_set = set(s.get_active_events())
+            state_id = s.get_id()
+            
+            for e in uc_events:
+                if e not in active_events_set:
+                    transitions_batch.append((state_id, state_id))
+                    events_batch.append(e)
+                    uncontrollable_batch.append(e)
+        
+        # Agregar todas las transiciones en una sola llamada
+        if transitions_batch:
+            self.add_transition(name, transitions_batch, events_batch, uncontrollable_batch)
 
     def add_self_events(self, name, events: list):  # Add a self loop  for each event in events in an automaton
         for e in events:
             self.add_self_event(name, e)
 
     def add_self_event(self, name, event, uncontrollable: bool = False):  # Add a self loop of one event in an automaton
+        # Optimización: precalcular verificaciones, usar sets, y batch processing
+        # Lógica: Si un evento está bloqueado (no en active_events), agregar autoloop
+        # Esto debe aplicarse a TODOS los estados donde el evento no está activo
+        
+        c_events_set = set(self.c_events)
+        uc_events_set = set(self.uc_events)
+        
+        # Determinar categoría del evento
+        is_uc = event in uc_events_set
+        is_new_event = event not in c_events_set and event not in uc_events_set
+        
+        # Batch processing: acumular transiciones para una sola llamada
+        transitions_batch = []
+        events_batch = []
+        uncontrollable_batch = []
+        
         for s in self.automatas[name].states:
-            active_events = s.get_active_events()
-            if event not in active_events:
-                if event not in self.c_events and event not in self.uc_events:
+            # Convertir a set para búsqueda O(1)
+            active_events_set = set(s.get_active_events())
+            
+            if event not in active_events_set:
+                state_id = s.get_id()
+                transitions_batch.append((state_id, state_id))
+                events_batch.append(event)
+                
+                # Determinar si es evento no controlable para el batch
+                if is_new_event:
                     if uncontrollable:
-                        self.add_transition(name, [(s.get_id(), s.get_id())], [event], [event])
-                    else:
-                        self.add_transition(name, [(s.get_id(), s.get_id())], [event], [])
-                        return
-                if event in self.uc_events:
-                    self.add_transition(name, [(s.get_id(), s.get_id())], [event], [event])
-                else:
-                    self.add_transition(name, [(s.get_id(), s.get_id())], [event], [])
+                        uncontrollable_batch.append(event)
+                    # Si es nuevo y controlable, no agregar a uncontrollable_batch
+                elif is_uc:
+                    uncontrollable_batch.append(event)
+                # Si es controlable conocido, no agregar a uncontrollable_batch
+        
+        # Agregar todas las transiciones en una sola llamada (batch processing)
+        if transitions_batch:
+            self.add_transition(name, transitions_batch, events_batch, uncontrollable_batch)
 
     def coordinator(self, supervisores, plantas):  # Returns if a pair of supervisors are nonconflicting
         TESTcoor = self.automata_syncronize(supervisores, "SUPt")
@@ -322,7 +363,9 @@ class process:
             transitions = []
             uc_events = []
             events = []
+            events_set = set()  # Para búsquedas O(1)
             aux = 0
+            
             for linea in archivo:
                 if '# states: ' in linea:
                     aux = linea.split()
@@ -334,14 +377,15 @@ class process:
 
                     num_state = int(aux[3])
                     self.new_automaton(name)
-                if "marker" in linea and not 'none' in linea:
+                if "marker" in linea and 'none' not in linea:
                     aux = 1
                     continue
                 if aux == 1:
                     if "\n" == linea:
                         continue
                     marked = [int(x) for x in linea.split()]
-                    self.add_state(name, num_state, [], [[x in marked for x in range(0, num_state)]])
+                    # Usar list comprehension es más eficiente
+                    self.add_state(name, num_state, [], [x in marked for x in range(num_state)])
                     aux = 2
                     continue
                 if "[" not in linea:
@@ -354,34 +398,44 @@ class process:
                 for transition in aux_transitions:
                     aux = transition.split(',')
                     transitions.append((int(aux[0]), int(aux[2])))
-                    if aux[1] in self.dict_events_name.keys():
-                        event = self.dict_events_name[aux[1]]
-                    else:
-                        event = aux[1]
-                    if event not in events:
+                    
+                    # Obtener evento (precalcular en vez de repetir)
+                    event_key = aux[1]
+                    event = self.dict_events_name.get(event_key, event_key)
+                    
+                    # Usar set para búsqueda O(1)
+                    if event not in events_set:
+                        events_set.add(event)
                         if int(aux[1]) % 2 == 0:
                             uc_events.append(event)
                     events.append(event)
+                    
         self.add_transition(name, transitions, events, uc_events)
         return name
 
     def aislated(self, aislated: list = [], actuators: list = [], interseccion=dict([])):
         # Generate ST code from Ailated supervisor and actuators.
-        out = ""
+        # Usar lista para acumular y join() al final (O(n) vs O(n²))
+        out_parts = []
         for a in aislated:
+            # Precalcular splits para evitar repetición
+            act_a0_parts = actuators[a[0]].split(':')
+            act_a1_part0 = actuators[a[1]].split(':')[0]
+            
             add = ""
-            if len(actuators[a[0]].split(':')) > 1:
-                add = "NOT " if actuators[a[0]].split(':')[1] == 'OFF' else ''
-            out += "\tIF NOT " + actuators[a[1]].split(':')[0] + " & " + add + actuators[a[0]].split(':')[
-                0] + " THEN\n\t\t"
-            out += actuators[a[1]].split(':')[0] + " := 1;\n"
-            out += "\tELSIF " + actuators[a[1]].split(':')[0] + " & " + add + actuators[a[0]].split(':')[
-                0] + " THEN\n\t\t"
-            out += actuators[a[0]].split(':')[0] + " := 0;\n\t"
-            if actuators[a[0]].split(':')[0] in interseccion.keys():
-                out += "\t" + actuators[a[0]].split(':')[0] + "_G[0] := 0;\n"
-            out += "END_IF;\n"
-        return out
+            if len(act_a0_parts) > 1:
+                add = "NOT " if act_a0_parts[1] == 'OFF' else ''
+            
+            out_parts.append(f"\tIF NOT {act_a1_part0} & {add}{act_a0_parts[0]} THEN\n\t\t")
+            out_parts.append(f"{act_a1_part0} := 1;\n")
+            out_parts.append(f"\tELSIF {act_a1_part0} & {add}{act_a0_parts[0]} THEN\n\t\t")
+            out_parts.append(f"{act_a0_parts[0]} := 0;\n\t")
+            
+            if act_a0_parts[0] in interseccion.keys():
+                out_parts.append(f"\t{act_a0_parts[0]}_G[0] := 0;\n")
+            out_parts.append("END_IF;\n")
+        
+        return ''.join(out_parts)
 
     def generate_ST_OPENPLC(self, supervisors: list, plants: list = [], actuators: dict = dict([]), namest='code_st',
                             Mask: dict = dict([]), Isolated: list = [], initial: str = "null"):
@@ -401,44 +455,64 @@ class process:
                                                Isolated=Isolated, initial=initial)
         else:
             Coordinators = []
-            Intersections = dict([])
+            Intersections = {}
+            
+            # Optimización: Precalcular eventos controlables como sets
+            supervisor_c_events = [set(self.automatas[sup].c_events) for sup in supervisors]
+            
             for i in range(len(supervisors)):
                 for j in range(i + 1, len(supervisors)):
                     nonconflict, TESTcoor, alltest = self.coordinator([supervisors[i], supervisors[j]],
                                                                       [plants[i],
                                                                        plants[j]])  # revisa si son conflictivos
                     if not nonconflict:
-                        print('conflict', i, j)
+                        print(f'conflict {i}, {j}')
                         TESTSUP = self.supcon(TESTcoor, alltest, 'SUPf')
                         TESTSUP_dat = self.condat(TESTcoor, TESTSUP, 'TESTSUPdat')
-                        CO = self.supreduce(TESTcoor, TESTSUP, TESTSUP_dat, "CO_" + str(i) + "_" + str(j))
+                        CO = self.supreduce(TESTcoor, TESTSUP, TESTSUP_dat, f"CO_{i}_{j}")
 #                        self.plot_automatas([CO, TESTcoor, alltest, TESTSUP], 1, False)
                         # DEStoADS(CO)
                         self.load_automata([CO])
                         Coordinators.append(CO)
-                    a = set(self.automatas[supervisors[i]].c_events)
-                    b = set(self.automatas[supervisors[j]].c_events)
-                    intersect = list(a & b)
-                    intersect = set([actuators[act].split(':')[0] for act in intersect])
-                    if len(intersect) != 0:
-                        for inter in intersect:
-                            if inter in Intersections.keys():
-                                if i not in Intersections[inter]:
-                                    Intersections[inter].append(i)
-                                if j not in Intersections[inter]:
-                                    Intersections[inter].append(j)
+                    
+                    # Optimización: Usar sets precalculados para intersección (O(min(n,m)) vs O(n*m))
+                    intersect_events = supervisor_c_events[i] & supervisor_c_events[j]
+                    
+                    if intersect_events:
+                        # Usar comprehension y precalcular split
+                        intersect_actuators = {actuators[act].split(':')[0] for act in intersect_events}
+                        
+                        for inter in intersect_actuators:
+                            if inter in Intersections:
+                                # Usar set para evitar duplicados (más eficiente)
+                                indices_set = set(Intersections[inter])
+                                indices_set.add(i)
+                                indices_set.add(j)
+                                Intersections[inter] = list(indices_set)
                             else:
                                 Intersections[inter] = [i, j]
+            # Optimización: Procesar coordinadores de forma más eficiente
             for c in Coordinators:
+                # Precalcular split del coordinador una sola vez
+                sup_indices = c.split('_')
+                sup_idx1 = int(sup_indices[1])
+                sup_idx2 = int(sup_indices[2])
+                
+                # Precalcular sets de eventos controlables para búsquedas O(1)
+                sup1_c_events = supervisor_c_events[sup_idx1]
+                sup2_c_events = supervisor_c_events[sup_idx2]
+                
                 for cont in self.automatas[c].c_events:
-                    if actuators[cont].split(':')[0] not in Intersections.keys():
-                        event = actuators[cont]
-                        Intersections[event.split(':')[0]] = []
-                        sup = c.split('_')
-                        if cont in self.automatas[supervisors[int(sup[1])]].c_events:
-                            Intersections[event.split(':')[0]].append(int(sup[1]))
-                        if cont in self.automatas[supervisors[int(sup[2])]].c_events:
-                            Intersections[event.split(':')[0]].append(int(sup[2]))
+                    # Precalcular split para evitar repetición
+                    event_actuator = actuators[cont].split(':')[0]
+                    
+                    if event_actuator not in Intersections:
+                        Intersections[event_actuator] = []
+                        # Usar sets precalculados para búsquedas O(1)
+                        if cont in sup1_c_events:
+                            Intersections[event_actuator].append(sup_idx1)
+                        if cont in sup2_c_events:
+                            Intersections[event_actuator].append(sup_idx2)
             COsw = ""
             COc = ""
             COu = ""
@@ -555,256 +629,289 @@ class process:
 
     def intersection(self, intersection: dict, CO=False, addG="_G[", addC="_C[", name_intersection="aux"):
         # Generate the code for the intersection between supervisors and coordinators
-        out = ""
+        # Usar listas para acumular strings eficientemente
+        out_parts = []
+        
         for inter in intersection.keys():
-            aux = ""
-            coor = ""
+            aux_parts = []
+            coor_parts = []
             bandera = inter if not CO else name_intersection
-            guesses = []
-            for act in range(len(intersection[inter])):
-                guesses.append(inter + addG + str(act) + "]")
+            guesses = [f"{inter}{addG}{act}]" for act in range(len(intersection[inter]))]
 
             if len(guesses) != 1:
                 if len(guesses) == 2:
-                    out += "\tIF "
-                    out += guesses[0] + " <> " + guesses[1] + " THEN\n"
-                    out += "\t\t" + guesses[0] + " := " + inter + ";\n"
-                    out += "\t\t" + guesses[1] + " := " + inter + ";"
+                    out_parts.extend([
+                        "\tIF ",
+                        f"{guesses[0]} <> {guesses[1]} THEN\n",
+                        f"\t\t{guesses[0]} := {inter};\n",
+                        f"\t\t{guesses[1]} := {inter};"
+                    ])
                 else:
-                    out += "\tIF "
-                    i = 0
-                    j = 1
-                    while j < len(guesses):
-                        aux += "\t\t" + guesses[i] + " := " + inter + ";\n"
-                        out += "(" + guesses[i] + " <> " + guesses[j] + ")"
-                        i += 1
-                        j += 1
-                        if j != len(guesses):
-                            out += " OR "
-                        else:
-                            out += " THEN\n"
-                    aux += "\t\t" + guesses[j - 1] + " := " + inter + ";\t\t\t"
+                    out_parts.append("\tIF ")
+                    conditions = []
+                    for i in range(len(guesses) - 1):
+                        aux_parts.append(f"\t\t{guesses[i]} := {inter};\n")
+                        conditions.append(f"({guesses[i]} <> {guesses[i+1]})")
+                    
+                    out_parts.append(" OR ".join(conditions))
+                    out_parts.append(" THEN\n")
+                    aux_parts.append(f"\t\t{guesses[-1]} := {inter};\t\t\t")
+            
             if CO:
-                coor += "\tIF " + bandera + " XOR " + inter + " THEN\n\t\t"
-                coor += "IF NOT " + bandera + " & " + inter + addC + "0] THEN\n\t\t\t"
-                coor += inter + " := 0;\n\t\t"
-                coor += "ELSIF " + bandera + " & " + inter + addC + "1] THEN\n\t\t\t"
-                coor += inter + " := 1;"
-                coor += "\n\t\tEND_IF;"
-                coor += "\n\tEND_IF;\n"
-                coor += "\t" + inter + addG + "0] := " + inter + ";\n"
-            out += aux + '\n'
+                coor_parts.extend([
+                    f"\tIF {bandera} XOR {inter} THEN\n\t\t",
+                    f"IF NOT {bandera} & {inter}{addC}0] THEN\n\t\t\t",
+                    f"{inter} := 0;\n\t\t",
+                    f"ELSIF {bandera} & {inter}{addC}1] THEN\n\t\t\t",
+                    f"{inter} := 1;",
+                    "\n\t\tEND_IF;",
+                    "\n\tEND_IF;\n",
+                    f"\t{inter}{addG}0] := {inter};\n"
+                ])
+            
+            out_parts.extend(aux_parts)
+            out_parts.append('\n')
+            
             if len(guesses) != 1:
-                out += "\tEND_IF;\n"
+                out_parts.append("\tEND_IF;\n")
 
-            out += "\t" + bandera + " := " + guesses[0] + ";\n"
-            out += coor
-        return out
+            out_parts.append(f"\t{bandera} := {guesses[0]};\n")
+            out_parts.extend(coor_parts)
+        
+        return ''.join(out_parts)
 
     def declaration_OPENPLC(self, actuators, n_state: list, n_automata=-1, intersetion: dict = dict([]), CO: list = [],
                             mascara: dict = dict([]), initial: str = 'null'):
         # Variable blocks for OPENPLC ST version
-
-        declaration = "\tVAR\n"
-        clocks = ""
-        start = "\tVAR\n"
-        start += '\t\trandom : random_number;\n'
-        start += '\t\trandom_num : DINT;\n'
+        # Usar listas para acumular y sets para búsquedas O(1)
+        declaration_parts = ["\tVAR\n"]
+        start_parts = ["\tVAR\n", '\t\trandom : random_number;\n', '\t\trandom_num : DINT;\n']
+        clocks_parts = []
+        
         if initial != 'null':
-            start += '\t\tinitial : BOOL;\n'
+            start_parts.append('\t\tinitial : BOOL;\n')
+            
         if n_automata == -1:
-            start += "\t\tstate :ARRAY [0..1] OF DINT;\n"
+            start_parts.append("\t\tstate :ARRAY [0..1] OF DINT;\n")
         else:
-            start += "\t\tstate : ARRAY [0.." + str(n_automata) + "] OF DINT;\n"
+            start_parts.append(f"\t\tstate : ARRAY [0..{n_automata}] OF DINT;\n")
+            
+        declared = set()  # Usar set para búsquedas O(1)
+        
         if len(CO) != 0:
-            declared = []
-            start += "\t\taux : BOOL := 0;\n"
+            start_parts.append("\t\taux : BOOL := 0;\n")
             for coor in CO:
                 for i in self.automatas[coor].c_events:
                     aux = actuators[i].split(':')[0]
                     if aux not in declared:
-                        start += "\t\t" + aux + "_C : ARRAY [0..1] OF BOOL;\n"
-                        declared.append(aux)
+                        start_parts.append(f"\t\t{aux}_C : ARRAY [0..1] OF BOOL;\n")
+                        declared.add(aux)
+                        
         if n_automata == -1 and n_state[0] != 0:
-            start += "\t\tslt0" + " : ARRAY [0.." + str(n_state[0]) + "] OF DINT;\n"
+            start_parts.append(f"\t\tslt0 : ARRAY [0..{n_state[0]}] OF DINT;\n")
 
-        for i in range(0, n_automata):
+        for i in range(n_automata):
             if n_state[i] == 0:
                 continue
-            start += "\t\tslt" + str(i) + " : ARRAY [0.." + str(n_state[i]) + "] OF DINT;\n"
+            start_parts.append(f"\t\tslt{i} : ARRAY [0..{n_state[i]}] OF DINT;\n")
 
         if len(intersetion.keys()) > 0:
             for inter in intersetion.keys():
-                start += "\t\t" + inter + "_G : ARRAY [0.." + str(len(intersetion[inter])) + "] OF BOOL;\n"
+                start_parts.append(f"\t\t{inter}_G : ARRAY [0..{len(intersetion[inter])}] OF BOOL;\n")
 
-        declared = []
+        declared.clear()  # Reutilizar el set
+        
         for msk in mascara.keys():
             for e in mascara[msk]:
-                declaration += "\t\t" + e[0] + " AT " + e[1] + " : BOOL;\n "
+                declaration_parts.append(f"\t\t{e[0]} AT {e[1]} : BOOL;\n ")
+                
         for act in actuators.values():
             aux = act.split(':')
             if 'INTERN' in aux[0]:
                 if aux[0] not in declared:
-                    start += "\t\t" + aux[0] + " : BOOL;\n"
-                    declared.append(aux[0])
+                    start_parts.append(f"\t\t{aux[0]} : BOOL;\n")
+                    declared.add(aux[0])
                     continue
+                    
             if aux[1] == 'ON' or aux[1] == 'OFF':
                 if aux[0] in declared:
                     continue
-                declaration += "\t\t" + aux[0] + " AT "
-                declared.append(aux[0])
-                if "IN" in aux[0]:
-                    declaration += aux[2] + " : BOOL;\n"
-                elif "OUT" in aux[0]:
-                    declaration += aux[2] + " : BOOL;\n"
+                declared.add(aux[0])
+                io_type = "IN" if "IN" in aux[0] else ("OUT" if "OUT" in aux[0] else None)
+                if io_type:
+                    declaration_parts.append(f"\t\t{aux[0]} AT {aux[2]} : BOOL;\n")
             else:
                 if aux[1] not in declared:
-                    declared.append(aux[1])
-                    declaration += "\t\t" + aux[1] + " AT "
-                    if "IN" in aux[1]:
-                        declaration += aux[2] + " : BOOL;\n"
-                    elif "OUT" in aux[1]:
-                        declaration += aux[2] + " : BOOL;\n"
-                start += "\t\t" + aux[0] + " : "
-
-                if "FE" in aux[0]:
-                    start += "F_TRIG;\n"
-                if "RE" in aux[0]:
-                    start += "R_TRIG;\n"
-
-                clocks += "\t" + aux[0] + '(CLK:= ' + aux[1] + ');\n'
-            ran = "\trandom(\n\t\tIN := True,\n\t\tOUT => random_num);\n"
-        start += "\tEND_VAR\n"
-        declaration += "\tEND_VAR\n"
-        return start + declaration + clocks + ran
+                    declared.add(aux[1])
+                    io_type = "IN" if "IN" in aux[1] else ("OUT" if "OUT" in aux[1] else None)
+                    if io_type:
+                        declaration_parts.append(f"\t\t{aux[1]} AT {aux[2]} : BOOL;\n")
+                
+                trig_type = "F_TRIG" if "FE" in aux[0] else ("R_TRIG" if "RE" in aux[0] else None)
+                if trig_type:
+                    start_parts.append(f"\t\t{aux[0]} : {trig_type};\n")
+                    clocks_parts.append(f"\t{aux[0]}(CLK:= {aux[1]});\n")
+                    
+        start_parts.append("\tEND_VAR\n")
+        declaration_parts.append("\tEND_VAR\n")
+        ran = "\trandom(\n\t\tIN := True,\n\t\tOUT => random_num);\n"
+        
+        return ''.join(start_parts) + ''.join(declaration_parts) + ''.join(clocks_parts) + ran
 
     def ifs(self, name: str, actuators=dict([]), n_state=0):  # Generate the ST code for conditional sentences
-        if_uncontrollable = "\t"
-        if_controllable = "\t"
         if name not in self.automatas.keys():
             return "ERROR"
+        
+        # Usar listas para acumular eficientemente
+        controllable_parts = []
+        uncontrollable_parts = []
+        
+        # Precalcular sets para búsquedas O(1)
+        c_events_set = set(self.c_events)
+        uc_events_set = set(self.uc_events)
+        
         transit = self.automatas[name].transitions
-        for i in range(0, len(transit)):
-            origin = self.automatas[name].transitions[i][0]
-            destination = self.automatas[name].transitions[i][2]
-            event = str(self.automatas[name].transitions[i][1])
-            if len(actuators) == 0:
-                name_event = self.dict_events_name[event]
-            else:
-                name_event = actuators[self.dict_events_name[event]]
-            name_event = name_event.split(':')
-
-            if name_event[1] == 'OFF':
-                name_event = 'NOT ' + name_event[0]
-            else:
-                name_event = name_event[0]
+        for origin, event_id, destination in transit:
             if origin == destination:
                 continue
-            if self.dict_events_name[event] in self.c_events:
-                if_controllable += "IF state[" + str(n_state) + "] = " + str(origin) \
-                                   + " & " + name_event \
-                                   + " THEN\n  " + "\t\t" + "state[" + str(n_state) + "] := " \
-                                   + str(destination) + ";\n  " + "\tELS"
-            elif self.dict_events_name[event] in self.uc_events:
-                if_uncontrollable += "IF state[" + str(n_state) + "] = " + str(origin) + " & "
-                if_uncontrollable += name_event + ('.Q' if 'FE' in name_event or 'RE' in name_event else '')
-                if_uncontrollable += " THEN\n  " + "\t\t" + "state[" + str(n_state) + "] := "
-                if_uncontrollable += str(destination) + ";\n  " + "\tELS"
-        if if_controllable == "\t": if_controllable = ""
-        if if_uncontrollable == "\t": if_uncontrollable = ""
-        if not if_controllable == "":
-            if_controllable = if_controllable.rstrip("ELS") + "END_IF;\n"
-        if not if_uncontrollable == "":
-            if_uncontrollable = if_uncontrollable.rstrip("ELS") + "END_IF;\n"
+                
+            event = str(event_id)
+            event_name = self.dict_events_name[event]
+            
+            # Obtener y procesar nombre del evento
+            if len(actuators) == 0:
+                name_event_raw = event_name
+            else:
+                name_event_raw = actuators[event_name]
+            
+            # Precalcular el split
+            name_event_parts = name_event_raw.split(':')
+            
+            # Determinar el nombre final del evento
+            if len(name_event_parts) > 1 and name_event_parts[1] == 'OFF':
+                name_event = f'NOT {name_event_parts[0]}'
+            else:
+                name_event = name_event_parts[0]
+            
+            # Generar código según tipo de evento
+            if event_name in c_events_set:
+                controllable_parts.append(
+                    f"IF state[{n_state}] = {origin} & {name_event} THEN\n  "
+                    f"\t\tstate[{n_state}] := {destination};\n  \tELS"
+                )
+            elif event_name in uc_events_set:
+                q_suffix = '.Q' if 'FE' in name_event or 'RE' in name_event else ''
+                uncontrollable_parts.append(
+                    f"IF state[{n_state}] = {origin} & {name_event}{q_suffix} THEN\n  "
+                    f"\t\tstate[{n_state}] := {destination};\n  \tELS"
+                )
+        
+        # Construir resultados finales
+        if_controllable = ""
+        if_uncontrollable = ""
+        
+        if controllable_parts:
+            if_controllable = ''.join(controllable_parts).rstrip("ELS") + "END_IF;\n"
+            
+        if uncontrollable_parts:
+            if_uncontrollable = ''.join(uncontrollable_parts).rstrip("ELS") + "END_IF;\n"
+        
         return if_controllable, if_uncontrollable
 
     def sw_case(self, name, actuators=dict([]), n_aut=0, n_state=0, intersection: dict = dict([])):
         # Generate the ST code for the case statements
-        act_guess = dict([])
-        for inter in intersection.keys():
-            for i in range(len(intersection[inter])):
-                if intersection[inter][i] == n_aut:
-                    if i in act_guess.keys():
-                        act_guess[i].append(inter)
-                    else:
-                        act_guess[i] = [inter]
+        # Precalcular act_guess de forma más eficiente
+        act_guess = {}
+        for inter, indices in intersection.items():
+            for i, idx in enumerate(indices):
+                if idx == n_aut:
+                    act_guess.setdefault(i, []).append(inter)
+        
         n_r = 0
         state_list = self.automatas[name].states
-        case = "\tCASE state[" + str(n_aut) + "] OF\n  "
+        case_parts = [f"\tCASE state[{n_aut}] OF\n  "]
+        
+        # Precalcular set de eventos no controlables para búsqueda O(1)
+        uc_events_set = set(self.uc_events)
+        
         for state in state_list:
-            events = [event for event in state.get_active_events() if event not in self.uc_events]
+            events = [event for event in state.get_active_events() if event not in uc_events_set]
             num_event = len(events)
-            if len(events) != 0:
-                case += "\t\t" + str(state.get_id()) + ":\n  "
-                if num_event > 1:
-                    case += "\t\t\tCASE " + "slt" + str(n_state) + "[" + str(n_r) + "] OF\n  "
-                    for i in range(0, num_event):
-                        name_event = events[i] if len(actuators) == 0 else actuators[events[i]]
-                        case += "\t\t\t\t" + str(i) + ":" + "\n  "
-                        aux = name_event.split(":")
-                        guess = ""
-                        for i in act_guess.keys():
-                            if aux[0] in act_guess[i]:
-                                guess = "_G[" + str(i) + "]"
-                        if "OFF" in name_event:
-                            case += "\t\t\t\t\t" + aux[0]
-                            case += guess
-                            case += " := 0;\n  "
-                        else:
-                            case += "\t\t\t\t\t" + aux[0]
-                            case += guess
-                            case += " := 1;\n  "
-                    case += "\t\t\tEND_CASE;\n  "
-                    case += ("\t\t\t" + "slt" + str(n_state) + "[" + str(n_r) + "] := " + "(random_num + " + "slt" +
-                             str(n_state) + "[" + str(n_r) + "]" + ") MOD " + str(num_event) + ";\n  ")
-                    case += "\t\t\t" + "random_num := " + "random_num - " + "slt" + str(n_state) + "[" + str(
-                        n_r) + "];\n "
-                    n_r += 1
-
-                elif num_event == 1:
-                    name_event = name_event = events[0] if len(actuators) == 0 else actuators[events[0]]
+            
+            if num_event == 0:
+                continue
+                
+            case_parts.append(f"\t\t{state.get_id()}:\n  ")
+            
+            if num_event > 1:
+                case_parts.append(f"\t\t\tCASE slt{n_state}[{n_r}] OF\n  ")
+                
+                for i, event in enumerate(events):
+                    name_event = events[i] if len(actuators) == 0 else actuators[event]
                     aux = name_event.split(":")
+                    
+                    # Buscar guess de forma más eficiente
                     guess = ""
-                    for i in act_guess.keys():
-                        if aux[0] in act_guess[i]:
-                            guess = "_G[" + str(i) + "]"
-                    if "OFF" in name_event:
-                        case += "\t\t\t" + aux[0]
-                        case += guess
-                        case += " := 0;\n  "
-                    else:
-                        case += "\t\t\t" + aux[0]
-                        case += guess
-                        case += " := 1;\n"
-
-        return [case + "\tEND_CASE;", n_r]
+                    for guess_idx, act_list in act_guess.items():
+                        if aux[0] in act_list:
+                            guess = f"_G[{guess_idx}]"
+                            break
+                    
+                    value = "0" if "OFF" in name_event else "1"
+                    case_parts.append(f"\t\t\t\t{i}:\n  \t\t\t\t\t{aux[0]}{guess} := {value};\n  ")
+                
+                case_parts.append("\t\t\tEND_CASE;\n  ")
+                case_parts.append(
+                    f"\t\t\tslt{n_state}[{n_r}] := (random_num + slt{n_state}[{n_r}]) MOD {num_event};\n  "
+                )
+                case_parts.append(f"\t\t\trandom_num := random_num - slt{n_state}[{n_r}];\n ")
+                n_r += 1
+                
+            elif num_event == 1:
+                name_event = events[0] if len(actuators) == 0 else actuators[events[0]]
+                aux = name_event.split(":")
+                
+                # Buscar guess de forma más eficiente
+                guess = ""
+                for guess_idx, act_list in act_guess.items():
+                    if aux[0] in act_list:
+                        guess = f"_G[{guess_idx}]"
+                        break
+                
+                value = "0" if "OFF" in name_event else "1"
+                case_parts.append(f"\t\t\t{aux[0]}{guess} := {value};\n")
+        
+        case_parts.append("\tEND_CASE;")
+        return [''.join(case_parts), n_r]
 
     def coordinator_sc(self, name, state_it: int = 2, actuators=dict([])):
         # Generate the ST code for the Coordinator case statements
         state_list = self.automatas[name].states
-        case = "\tCASE state[" + str(state_it) + "] OF\n  "
+        case_parts = [f"\tCASE state[{state_it}] OF\n  "]
+        
+        # Precalcular set de eventos no controlables para búsqueda O(1)
+        uc_events_set = set(self.uc_events)
+        
         for state in state_list:
             all_events = self.automatas[name].c_events
-            events = [event for event in state.get_active_events() if event not in self.uc_events]
-            num_event = len(all_events)
-            if len(events) != 0:
-                case += "\t\t" + str(state.get_id()) + ":\n  "
-                for i in range(0, num_event):
-                    name_event = all_events[i] if len(actuators) == 0 else actuators[all_events[i]]
-                    aux = name_event.split(":")
-                    if "OFF" in name_event:
-                        case += "\t\t\t" + aux[0]
-                        case += "_C" + "[0]"
-                    else:
-                        case += "\t\t\t" + aux[0]
-                        case += "_C" + "[1]"
-                    if all_events[i] in events:
-                        case += " := 1;\n"
-                    else:
-                        case += " := 0;\n"
-
-        case += "\tEND_CASE;\n  "
-        return case
+            events_set = set(event for event in state.get_active_events() if event not in uc_events_set)
+            
+            if not events_set:
+                continue
+                
+            case_parts.append(f"\t\t{state.get_id()}:\n  ")
+            
+            for event in all_events:
+                name_event = event if len(actuators) == 0 else actuators[event]
+                aux = name_event.split(":")
+                
+                index = "[0]" if "OFF" in name_event else "[1]"
+                value = "1" if event in events_set else "0"
+                
+                case_parts.append(f"\t\t\t{aux[0]}_C{index} := {value};\n")
+        
+        case_parts.append("\tEND_CASE;\n  ")
+        return ''.join(case_parts)
     def __str__(self):
         if not self.automatas:
             return "No automata loaded."
